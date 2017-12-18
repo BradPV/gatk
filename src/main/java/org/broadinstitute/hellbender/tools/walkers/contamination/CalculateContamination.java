@@ -13,6 +13,7 @@ import org.broadinstitute.hellbender.cmdline.CommandLineProgram;
 import org.broadinstitute.hellbender.cmdline.StandardArgumentDefinitions;
 import org.broadinstitute.hellbender.cmdline.programgroups.VariantProgramGroup;
 import org.broadinstitute.hellbender.tools.copynumber.utils.segmentation.KernelSegmenter;
+import org.broadinstitute.hellbender.tools.walkers.validation.basicshortmutpileup.BetaBinomialDistribution;
 import org.broadinstitute.hellbender.utils.IndexRange;
 import org.broadinstitute.hellbender.utils.MathUtils;
 import org.broadinstitute.hellbender.tools.walkers.mutect.FilterMutectCalls;
@@ -61,6 +62,9 @@ public class CalculateContamination extends CommandLineProgram {
     private static final int MAX_CHANGEPOINTS_PER_CHROMOSOME = 10;
     private static final int MIN_SITES_PER_SEGMENT = 5;
 
+    // our analysis only cares about hom alt and het sites, so we throw away hom refs with a very conservative heuristic
+    private static final double ALT_FRACTION_OF_DEFINITE_HOM_REF = 0.05;
+
     private static final double KERNEL_SEGMENTER_LINEAR_COST = 0.0;
     private static final double KERNEL_SEGMENTER_LOG_LINEAR_COST = 0.0;
     private static final int KERNEL_SEGMENTER_DIMENSION = 20;
@@ -68,6 +72,14 @@ public class CalculateContamination extends CommandLineProgram {
 
     private static final double DEFAULT_LOW_COVERAGE_RATIO_THRESHOLD = 1.0/3;
     private static final double DEFAULT_HIGH_COVERAGE_RATIO_THRESHOLD = 2.0;
+
+    // shape parameters for beta binomial distributions of hom alt and het read counts
+    // the het distribution is peaked at an alt fraction of 0.5 and falls to 1/10 of its max around 0.35 and 0.65
+    private static final double HET_ALPHA = 30.0;
+    private static final double HET_BETA = 30.0;
+    private static final double HOM_ALT_ALPHA = 60.0;
+    private static final double HOM_ALT_BETA = 1.0;
+
 
     @Argument(fullName = StandardArgumentDefinitions.INPUT_LONG_NAME,
             shortName = StandardArgumentDefinitions.INPUT_SHORT_NAME,
@@ -121,7 +133,7 @@ public class CalculateContamination extends CommandLineProgram {
         return allSites.stream().filter(homAltsInMatchedNormalOverlapDetector::overlapsAny).collect(Collectors.toList());
     }
 
-    private static List<PileupSummary> findHomAltSites(List<PileupSummary> pileupSummaries) {
+    private List<PileupSummary> findHomAltSites(List<PileupSummary> pileupSummaries) {
         final List<Integer> changepoints = new ArrayList<>();
 
         // when the kernel segmenter finds a changepoint at index n, that means index n belongs to the left segment, which goes
@@ -143,14 +155,8 @@ public class CalculateContamination extends CommandLineProgram {
                     pileupSummaries.get(segment.from).getContig(), pileupSummaries.get(segment.from).getStart(),
                     pileupSummaries.get(segment.to - 1).getContig(), pileupSummaries.get(segment.to - 1).getStart()));
 
-            final double[] minorAlleleFractions = segment.mapToDouble(n -> pileupSummaries.get(n).getMinorAlleleFraction());
-            final double minorAlleleFractionThreshold = partitionThreshold(minorAlleleFractions);
-
-            segment.forEach(n -> {
-                if (pileupSummaries.get(n).getAltFraction() > 1 - minorAlleleFractionThreshold) {
-                    homAltSites.add(pileupSummaries.get(n));
-                }
-            });
+            final List<PileupSummary> segmentSites = IntStream.range(segment.from, segment.to).mapToObj(pileupSummaries::get).collect(Collectors.toList());
+            homAltSites.addAll(findHomAltSitesInSegment(segmentSites));
         }
         return homAltSites;
     }
@@ -188,6 +194,7 @@ public class CalculateContamination extends CommandLineProgram {
         final double highCoverageThreshold = medianCoverage * highCoverageRatioThreshold;
         return allSites.stream()
                 .filter(ps -> ps.getTotalCount() > lowCoverageThreshold && ps.getTotalCount() < highCoverageThreshold)
+                .filter(ps -> ps.getAltFraction() > ALT_FRACTION_OF_DEFINITE_HOM_REF)
                 .collect(Collectors.toList());
     }
 
@@ -199,46 +206,26 @@ public class CalculateContamination extends CommandLineProgram {
                 Arrays.asList(POINTS_PER_SEGMENTATION_WINDOW), KERNEL_SEGMENTER_LINEAR_COST, KERNEL_SEGMENTER_LOG_LINEAR_COST, KernelSegmenter.ChangepointSortOrder.INDEX);
     }
 
-    // find the threshold for 1-D data that creates an optimal clustering into two components by minimizing the objective:
-    // argmin_x variance({y : y < x}) + variance({y : y >= x})
-    // note that this is not a weighted average of variances, that is, we assume both clusters are equally significant
-    // even though they may not be equal in size
-    private static double partitionThreshold(final double[] data) {
-        if (data.length == 0) {
-            return 0;
-        } else if (data.length == 1) {
-            return data[0];
-        } else if (data.length == 2) {
-            return (data[0] + data[1])/2;
-        }
 
-        final double[] sorted = Arrays.stream(data).sorted().toArray();
+    private List<PileupSummary> findHomAltSitesInSegment(final List<PileupSummary> sites) {
+        return sites.stream().filter(site -> homAltProbability(site) > 0.5).collect(Collectors.toList());
+    }
 
-        final int n = sorted.length;
-        // sum of elements < threshold and >= threshold
-        double sumBelow = 0;
-        double sumAbove = MathUtils.sum(sorted);
-        double sumSquaredBelow = 0;
-        double sumSquaredAbove = Arrays.stream(sorted).map(MathUtils::square).sum();
-        double bestScore = Double.POSITIVE_INFINITY;
-        int bestIndex = 0;
+    private double homAltProbability(final PileupSummary site) {
+        final double alleleFrequency = site.getAlleleFrequency();
+        final double homAltPrior = MathUtils.square(alleleFrequency);
+        final double hetPrior = 2 * alleleFrequency * (1 - alleleFrequency);
 
-        for (int k = 1; k < n; k++) {
-            sumBelow += sorted[k - 1];
-            sumAbove -= sorted[k - 1];
-            sumSquaredBelow += MathUtils.square(sorted[k - 1]);
-            sumSquaredAbove -= MathUtils.square(sorted[k - 1]);
+        final int altCount = site.getAltCount();
+        final int totalCount = altCount + site.getRefCount();
 
-            // variance is mean of squares minus square of mean
-            final double varianceBelow = (sumSquaredBelow / k) - MathUtils.square(sumBelow / k);
-            final double varianceAbove = (sumSquaredAbove / (n - k)) - MathUtils.square(sumAbove / (n - k));
-            final double score = varianceBelow + varianceAbove;
-            if (score < bestScore) {
-                bestScore = score;
-                bestIndex = k;
-            }
-        }
+        final double homAltLikelihood = new BetaBinomialDistribution(null, HOM_ALT_ALPHA, HOM_ALT_BETA, totalCount).probability(altCount);
+        final double hetLikelihood = new BetaBinomialDistribution(null, HET_ALPHA, HET_BETA, totalCount).probability(altCount);
 
-        return sorted[bestIndex];
+        final double unnormalizedHomAltProbability = homAltPrior * homAltLikelihood;
+        final double unnormalizedHetProbability = hetPrior * hetLikelihood;
+
+        return unnormalizedHomAltProbability / (unnormalizedHetProbability + unnormalizedHomAltProbability);
+
     }
 }

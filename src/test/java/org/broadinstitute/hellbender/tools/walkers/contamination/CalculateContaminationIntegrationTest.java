@@ -25,7 +25,7 @@ public class CalculateContaminationIntegrationTest extends CommandLineProgramTes
     public static final File NA12891_3_PCT_NA12892_97_PCT = new File(SPIKEIN_DATA_DIRECTORY, "NA12891_0.03_NA12892_0.97.table");
     public static final File NA12891_5_PCT_NA12892_95_PCT = new File(SPIKEIN_DATA_DIRECTORY, "NA12891_0.05_NA12892_0.95.table");
     public static final File NA12891_8_PCT_NA12892_92_PCT = new File(SPIKEIN_DATA_DIRECTORY, "NA12891_0.08_NA12892_0.92.table");
-    public static final double BASELINE_CONTAMINATION_OF_NA12892 = 0.01;
+    public static final double BASELINE_CONTAMINATION_OF_NA12892 = 0.001;
 
     @Test
     public void testArtificialData() {
