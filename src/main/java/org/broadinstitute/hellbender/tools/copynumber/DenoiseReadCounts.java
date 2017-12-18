@@ -13,27 +13,89 @@ import org.broadinstitute.hellbender.cmdline.programgroups.CopyNumberProgramGrou
 import org.broadinstitute.hellbender.exceptions.UserException;
 import org.broadinstitute.hellbender.tools.copynumber.denoising.*;
 import org.broadinstitute.hellbender.tools.copynumber.formats.CopyNumberStandardArgument;
+import org.broadinstitute.hellbender.tools.copynumber.formats.collections.CopyRatioCollection;
 import org.broadinstitute.hellbender.tools.copynumber.formats.collections.SimpleCountCollection;
+import org.broadinstitute.hellbender.utils.IntervalMergingRule;
 import org.broadinstitute.hellbender.utils.Utils;
 import org.broadinstitute.hellbender.utils.io.IOUtils;
 
 import java.io.File;
 
 /**
- * Denoises read counts given the panel of normals (PoN) created by {@link CreateReadCountPanelOfNormals} to produce
- * a copy-ratio profile.  Both HDF5 and TSV read-count file input are supported.
+ * Denoise read counts to produce a denoised copy-ratio profile.
+ *
+ * <p>
+ *     Typically, a panel of normals produced by {@link CreateReadCountPanelOfNormals} is provided as input.
+ *     The input counts are then standardized by 1) transforming to fractional coverage,
+ *     2) performing optional explicit GC-bias correction (if the panel contains GC-content annotated intervals),
+ *     3) filtering intervals to those contained in the panel, 4) dividing by interval medians contained in the panel,
+ *     5) dividing by the sample median, and 6) transforming to log-2 copy ratio.  The result is then denoised by
+ *     subtracting the projection onto the specified number of principal components from the panel.
+ * </p>
+ *
+ * <p>
+ *     If no panel is provided, then the input counts are instead standardized by 1) transforming to fractional coverage,
+ *     2) performing optional explicit GC-bias correction (if GC-content annotated intervals are provided),
+ *     3) dividing by the sample median, and 4) transforming to log-2 copy ratio.  The denoised result is taken to be
+ *     identical to the standardized result.
+ * </p>
+ *
+ * <h3>Input</h3>
+ *
+ * <li>
+ *     Counts file.
+ *     This is the TSV or HDF5 output of {@link CollectFragmentCounts}.
+ * </li>
+ * <li>
+ *     (Optional) Panel-of-normals file.
+ *     This is the output of {@link CreateReadCountPanelOfNormals}.  If provided,
+ *     it will be used to standardize and denoise the input counts.  This may include explicit GC-bias correction
+ *     if annotated intervals were used to create the panel.
+ * </li>
+ * <li>
+ *     (Optional) GC-content annotated-intervals file.
+ *     This can be provided in place of a panel of normals to perform explicit GC-bias correction.
+ * </li>
+ *
+ * <h3>Output</h3>
+ *
+ * <li>
+ *     Standardized copy-ratio profile file.
+ *     This is a TSV with a SAM-style header containing a read-group sample name, a sequence dictionary,
+ *     a row specifying the column headers contained in {@link CopyRatioCollection.CopyRatioTableColumn},
+ *     and the corresponding entry rows.
+ * </li>
+ * <li>
+ *     Denoised copy-ratio profile file.
+ *     This is a TSV with a SAM-style header containing a read-group sample name, a sequence dictionary,
+ *     a row specifying the column headers contained in {@link CopyRatioCollection.CopyRatioTableColumn},
+ *     and the corresponding entry rows.
+ * </li>
  *
  * <h3>Examples</h3>
  *
  * <pre>
- * gatk-launch --javaOptions "-Xmx4g" DenoiseReadCounts \
- *   --input tumor.readCounts.tsv \
- *   --readCountPanelOfNormals panel_of_normals.hdf5 \
- *   --standardizedCopyRatios tumor.standardizedCR.tsv \
- *   --denoisedCopyRatios tumor.denoisedCR.tsv
+ *     gatk DenoiseReadCounts \
+ *          -I sample.counts.hdf5 \
+ *          --readCountPanelOfNormals panel_of_normals.pon.hdf5 \
+ *          --standardizedCopyRatios sample.standardizedCR.tsv \
+ *          --denoisedCopyRatios sample.denoisedCR.tsv
  * </pre>
  *
- * The resulting copy-ratio profile is log2 transformed.
+ * <pre>
+ *     gatk DenoiseReadCounts \
+ *          -I sample.counts.hdf5 \
+ *          --annotated-intervals annotated_intervals.tsv \
+ *          --standardizedCopyRatios sample.standardizedCR.tsv \
+ *          --denoisedCopyRatios sample.denoisedCR.tsv
+ * </pre>
+ *
+ * <pre>
+ *     gatk DenoiseReadCounts \
+ *          -I sample.counts.hdf5 \
+ *          --standardizedCopyRatios sample.standardizedCR.tsv \
+ *          --denoisedCopyRatios sample.denoisedCR.tsv
+ * </pre>
  *
  * @author Samuel Lee &lt;slee@broadinstitute.org&gt;
  */

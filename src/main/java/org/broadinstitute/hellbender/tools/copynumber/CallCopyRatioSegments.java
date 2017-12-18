@@ -19,7 +19,7 @@ import java.io.File;
  * <h3>Input</h3>
  *
  * <li>
- *     File containing copy-ratio segments.
+ *     Copy-ratio segments file.
  *     This is a .cr.seg file produced as one of the outputs of {@link ModelSegments}, which
  *     is a TSV with a SAM-style header containing a read-group sample name, a sequence dictionary,
  *     a row specifying the column headers contained in {@link CopyRatioSegmentCollection.CopyRatioSegmentTableColumn},
@@ -29,7 +29,7 @@ import java.io.File;
  * <h3>Output</h3>
  *
  * <li>
- *     File containing called copy-ratio segments.
+ *     Called copy-ratio segments file.
  *     This is a TSV with a SAM-style header containing a read-group sample name, a sequence dictionary,
  *     a row specifying the column headers contained in {@link CalledCopyRatioSegmentCollection.CalledCopyRatioSegmentTableColumn},
  *     and the corresponding entry rows.

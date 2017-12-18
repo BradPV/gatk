@@ -49,7 +49,7 @@ import static org.broadinstitute.hellbender.tools.copynumber.formats.collections
  * <h3>Output</h3>
  *
  * <li>
- *     File containing allelic counts.
+ *     Allelic-counts file.
  *     This is a TSV with a SAM-style header containing a read-group sample name, a sequence dictionary,
  *     a row specifying the column headers contained in {@link AllelicCountCollection.AllelicCountTableColumn},
  *     and the corresponding entry rows.

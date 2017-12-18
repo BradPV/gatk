@@ -41,7 +41,7 @@ import java.util.List;
  * <h3>Output</h3>
  *
  * <li>
- *     File containing intervals annotated with GC content.
+ *     GC-content annotated-intervals file.
  *     This is a TSV with a SAM-style header containing a sequence dictionary,
  *     a row specifying the column headers contained in {@link AnnotatedIntervalCollection.AnnotatedIntervalTableColumn},
  *     and the corresponding entry rows.
