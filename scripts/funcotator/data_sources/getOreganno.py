@@ -25,6 +25,8 @@ OREGANNO_KEYS = ['Outcome', 'Type', 'Gene_Symbol', 'Gene_ID', 'Gene_Source', 'Re
 VALUES_DELIMITER = '|'
 NON_VALUE = "N/A"
 
+ENABLE_STDOUT = False
+
 ########################################################################
 # Functions:
 
@@ -36,8 +38,9 @@ def get_values_data_from_row_dict(r):
 
     for i in xrange(0, len(OREGANNO_KEYS)):
         key = OREGANNO_KEYS[i]
-        if r[key] != NON_VALUE:
-            values.append(key + "=" + r[key])
+        val = r[key].strip()
+        if val != NON_VALUE:
+            values.append(key + "=" + val)
 
     return VALUES_DELIMITER.join(values)
 
@@ -112,11 +115,11 @@ if __name__ == '__main__':
 
         # Get the trivial fields here:
         row = dict()
-        row['Build'] = line['Build']
-        row['Chr'] = line['Chr']
-        row['Start'] = line['Start']
-        row['End'] = line['End']
-        row['ID'] = line['ORegAnno_ID']
+        row['Build'] = line['Build'].strip()
+        row['Chr'] = line['Chr'].strip()
+        row['Start'] = line['Start'].strip()
+        row['End'] = line['End'].strip()
+        row['ID'] = line['ORegAnno_ID'].strip()
 
         # Get the values field from our helper method:
         row['Values'] = get_values_data_from_row_dict(line)
