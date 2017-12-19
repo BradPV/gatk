@@ -65,19 +65,19 @@ public class CalculateContamination extends CommandLineProgram {
     // our analysis only cares about hom alt and het sites, so we throw away hom refs with a very conservative heuristic
     private static final double ALT_FRACTION_OF_DEFINITE_HOM_REF = 0.05;
 
-    private static final double KERNEL_SEGMENTER_LINEAR_COST = 0.0;
-    private static final double KERNEL_SEGMENTER_LOG_LINEAR_COST = 0.0;
-    private static final int KERNEL_SEGMENTER_DIMENSION = 20;
-    private static final int POINTS_PER_SEGMENTATION_WINDOW = 100;
+    private static final double KERNEL_SEGMENTER_LINEAR_COST = 1.0;
+    private static final double KERNEL_SEGMENTER_LOG_LINEAR_COST = 1.0;
+    private static final int KERNEL_SEGMENTER_DIMENSION = 100;
+    private static final int POINTS_PER_SEGMENTATION_WINDOW = 50;
 
-    private static final double DEFAULT_LOW_COVERAGE_RATIO_THRESHOLD = 1.0/3;
+    private static final double DEFAULT_LOW_COVERAGE_RATIO_THRESHOLD = 1.0/2;
     private static final double DEFAULT_HIGH_COVERAGE_RATIO_THRESHOLD = 2.0;
 
     // shape parameters for beta binomial distributions of hom alt and het read counts
     // the het distribution is peaked at an alt fraction of 0.5 and falls to 1/10 of its max around 0.35 and 0.65
     private static final double HET_ALPHA = 30.0;
     private static final double HET_BETA = 30.0;
-    private static final double HOM_ALT_ALPHA = 60.0;
+    private double HOM_ALT_ALPHA = 120.0;
     private static final double HOM_ALT_BETA = 1.0;
 
 
@@ -103,11 +103,13 @@ public class CalculateContamination extends CommandLineProgram {
     @Argument(fullName= "highCoverageRatioThreshold",
             doc="The maximum coverage relative to the median.", optional = true)
     private final double highCoverageRatioThreshold = DEFAULT_HIGH_COVERAGE_RATIO_THRESHOLD;
+
+    private static final double SEGMENTATION_KERNEL_VARIANCE = 0.025;
     
     private static final BiFunction<PileupSummary, PileupSummary, Double> SEGMENTATION_KERNEL = (ps1, ps2) -> {
         final double maf1 = FastMath.min(ps1.getAltFraction(), 1 - ps1.getAltFraction());
         final double maf2 = FastMath.min(ps2.getAltFraction(), 1 - ps2.getAltFraction());
-        return FastMath.exp(-MathUtils.square(maf1 - maf2));
+        return FastMath.exp(-MathUtils.square(maf1 - maf2)/(2 * SEGMENTATION_KERNEL_VARIANCE));
     };
 
     @Override
@@ -118,12 +120,33 @@ public class CalculateContamination extends CommandLineProgram {
 
         // used the matched normal to genotype if available
         final List<PileupSummary> pileupSummariesForGenotyping = matchedPileupSummaries == null ? pileupSummaries : matchedPileupSummaries;
-        final List<PileupSummary> homAltSites = findHomAltSites(pileupSummariesForGenotyping);
+        final double expectedHomAltCount = pileupSummariesForGenotyping.stream()
+                .mapToDouble(PileupSummary::getAlleleFrequency)
+                .map(MathUtils::square)
+                .sum();
 
-        final List<PileupSummary> homAltPileups = matchedPileupSummaries == null ? homAltSites : getCorrespondingHomAltSites(homAltSites, pileupSummaries);
+        int iteration = 0;
+        double currentContamination = 0.0;
+        while (true) {
+            final double oldContamination = currentContamination;
+            final List<PileupSummary> homAltSites = findHomAltSites(pileupSummariesForGenotyping);
+            final List<PileupSummary> homAltPileups = matchedPileupSummaries == null ? homAltSites : getCorrespondingHomAltSites(homAltSites, pileupSummaries);
+            final Pair<Double, Double> contaminationAndError = calculateContamination(homAltPileups, true);
+            currentContamination = contaminationAndError.getLeft();
 
-        final Pair<Double, Double> contaminationAndError = calculateContamination(homAltPileups);
-        ContaminationRecord.writeContaminationTable(Arrays.asList(new ContaminationRecord(ContaminationRecord.Level.WHOLE_BAM.toString(), contaminationAndError.getLeft(), contaminationAndError.getRight())), outputTable);
+            if (homAltSites.size() > expectedHomAltCount) {
+                HOM_ALT_ALPHA *= 1.3;
+            } else {
+                HOM_ALT_ALPHA /= 1.3;
+            }
+
+
+            if (++iteration > 10 || Math.abs(currentContamination - oldContamination) < 0.001) {
+                final double error = contaminationAndError.getRight();
+                ContaminationRecord.writeContaminationTable(Arrays.asList(new ContaminationRecord(ContaminationRecord.Level.WHOLE_BAM.toString(), currentContamination, error)), outputTable);
+                break;
+            }
+        }
 
         return "SUCCESS";
     }
@@ -134,6 +157,44 @@ public class CalculateContamination extends CommandLineProgram {
     }
 
     private List<PileupSummary> findHomAltSites(List<PileupSummary> pileupSummaries) {
+        final List<IndexRange> segments = findAllelicCopyNumberSegments(pileupSummaries)
+                .stream().filter(s -> s.size() >= MIN_SITES_PER_SEGMENT).collect(Collectors.toList());
+
+        final List<List<PileupSummary>> homAltSitesBySegment = findHomAltSitesBySegment(pileupSummaries, segments);
+
+        final double[] contaminationEstimatesBySegment = homAltSitesBySegment.stream()
+                .mapToDouble(segmentSites -> calculateContamination(segmentSites, false).getLeft())
+                .toArray();
+        final double[] nonZeroContaminationEstimatesBySegment = Arrays.stream(contaminationEstimatesBySegment)
+                .filter(c -> c > 0).toArray();
+        final double medianSegmentEstimate = new Median().evaluate(nonZeroContaminationEstimatesBySegment);
+
+        // filter out segments with very high contamination, which is likely due to loss of heterozygosity
+        final List<List<PileupSummary>> believableHomAltSitesBySegment = IntStream.range(0, homAltSitesBySegment.size())
+                .filter(n -> contaminationEstimatesBySegment[n] < 2 * medianSegmentEstimate || contaminationEstimatesBySegment[n] < medianSegmentEstimate + 0.05)
+                .mapToObj(homAltSitesBySegment::get)
+                .collect(Collectors.toList());
+
+        return believableHomAltSitesBySegment.stream().flatMap(List::stream).collect(Collectors.toList());
+    }
+
+
+    private List<List<PileupSummary>> findHomAltSitesBySegment(List<PileupSummary> pileupSummaries, List<IndexRange> segments) {
+        final List<List<PileupSummary>> homAltSitesBySegment = new ArrayList<>();
+        for (final IndexRange segment : segments) {
+            logger.info(String.format("Considering segment with %d sites from %s:%d to %s:%d", segment.size(),
+                    pileupSummaries.get(segment.from).getContig(), pileupSummaries.get(segment.from).getStart(),
+                    pileupSummaries.get(segment.to - 1).getContig(), pileupSummaries.get(segment.to - 1).getStart()));
+
+            final List<PileupSummary> segmentSites = IntStream.range(segment.from, segment.to).mapToObj(pileupSummaries::get).collect(Collectors.toList());
+            final List<PileupSummary> homAltSitesInSegment = findHomAltSitesInSegment(segmentSites);
+
+            homAltSitesBySegment.add(homAltSitesInSegment);
+        }
+        return homAltSitesBySegment;
+    }
+
+    private List<IndexRange> findAllelicCopyNumberSegments(List<PileupSummary> pileupSummaries) {
         final List<Integer> changepoints = new ArrayList<>();
 
         // when the kernel segmenter finds a changepoint at index n, that means index n belongs to the left segment, which goes
@@ -142,26 +203,12 @@ public class CalculateContamination extends CommandLineProgram {
         changepoints.add(-1);
         changepoints.addAll(getChangepoints(pileupSummaries));
         changepoints.add(pileupSummaries.size()-1);
-        final List<IndexRange> segments = IntStream.range(0, changepoints.size() - 1)
+        return IntStream.range(0, changepoints.size() - 1)
                 .mapToObj(n -> new IndexRange(changepoints.get(n) + 1, changepoints.get(n+1) + 1))
                 .collect(Collectors.toList());
-
-        final List<PileupSummary> homAltSites = new ArrayList<>();
-        for (final IndexRange segment : segments) {
-            if (segment.size() < MIN_SITES_PER_SEGMENT) {
-                continue;
-            }
-            logger.info(String.format("Considering segment with %d sites from %s:%d to %s:%d", segment.size(),
-                    pileupSummaries.get(segment.from).getContig(), pileupSummaries.get(segment.from).getStart(),
-                    pileupSummaries.get(segment.to - 1).getContig(), pileupSummaries.get(segment.to - 1).getStart()));
-
-            final List<PileupSummary> segmentSites = IntStream.range(segment.from, segment.to).mapToObj(pileupSummaries::get).collect(Collectors.toList());
-            homAltSites.addAll(findHomAltSitesInSegment(segmentSites));
-        }
-        return homAltSites;
     }
 
-    private static Pair<Double, Double> calculateContamination(List<PileupSummary> homAltSites) {
+    private static Pair<Double, Double> calculateContamination(List<PileupSummary> homAltSites, final boolean doLogging) {
         if (homAltSites.isEmpty()) {
             logger.warn("No hom alt sites found!  Perhaps GetPileupSummaries was run on too small of an interval, or perhaps the sample was extremely inbred or haploid.");
             return Pair.of(0.0, 1.0);
@@ -179,11 +226,13 @@ public class CalculateContamination extends CommandLineProgram {
         final double contamination = contaminationRefCount / totalDepthWeightedByRefFrequency;
         final double standardError = Math.sqrt(contamination / totalDepthWeightedByRefFrequency);
 
-        logger.info(String.format("In %d homozygous variant sites we find %d reference reads due to contamination and %d" +
-                        " due to to sequencing error out of a total %d reads.", homAltSites.size(), contaminationRefCount, errorRefCount, totalReadCount));
-        logger.info(String.format("Based on population data, we would expect %d reference reads in a contaminant with equal depths at these sites.", (long) totalDepthWeightedByRefFrequency));
-        logger.info(String.format("Therefore, we estimate a contamination of %.3f.", contamination));
-        logger.info(String.format("The error bars on this estimate are %.5f.", standardError));
+        if (doLogging) {
+            logger.info(String.format("In %d homozygous variant sites we find %d reference reads due to contamination and %d" +
+                    " due to to sequencing error out of a total %d reads.", homAltSites.size(), contaminationRefCount, errorRefCount, totalReadCount));
+            logger.info(String.format("Based on population data, we would expect %d reference reads in a contaminant with equal depths at these sites.", (long) totalDepthWeightedByRefFrequency));
+            logger.info(String.format("Therefore, we estimate a contamination of %.3f.", contamination));
+            logger.info(String.format("The error bars on this estimate are %.5f.", standardError));
+        }
         return Pair.of(contamination, standardError);
     }
 
@@ -225,7 +274,9 @@ public class CalculateContamination extends CommandLineProgram {
         final double unnormalizedHomAltProbability = homAltPrior * homAltLikelihood;
         final double unnormalizedHetProbability = hetPrior * hetLikelihood;
 
-        return unnormalizedHomAltProbability / (unnormalizedHetProbability + unnormalizedHomAltProbability);
+        final double result = unnormalizedHomAltProbability / (unnormalizedHetProbability + unnormalizedHomAltProbability);
+
+        return result;
 
     }
 }
