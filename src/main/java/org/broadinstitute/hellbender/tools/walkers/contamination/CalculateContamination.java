@@ -1,6 +1,7 @@
 package org.broadinstitute.hellbender.tools.walkers.contamination;
 
 import htsjdk.samtools.util.OverlapDetector;
+import org.apache.commons.lang3.Range;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.commons.math3.stat.descriptive.rank.Median;
 import org.apache.commons.math3.util.FastMath;
@@ -17,6 +18,7 @@ import org.broadinstitute.hellbender.tools.walkers.validation.basicshortmutpileu
 import org.broadinstitute.hellbender.utils.IndexRange;
 import org.broadinstitute.hellbender.utils.MathUtils;
 import org.broadinstitute.hellbender.tools.walkers.mutect.FilterMutectCalls;
+import org.broadinstitute.hellbender.utils.SimpleInterval;
 
 import java.io.File;
 import java.util.*;
@@ -63,6 +65,8 @@ public class CalculateContamination extends CommandLineProgram {
 
     // our analysis only cares about hom alt and het sites, so we throw away hom refs with a very conservative heuristic
     private static final double ALT_FRACTION_OF_DEFINITE_HOM_REF = 0.05;
+
+    private static final Range<Double> ALT_FRACTIONS_FOR_SEGMENTATION = Range.between(0.2, 0.8);
 
     private static final double KERNEL_SEGMENTER_LINEAR_COST = 1.0;
     private static final double KERNEL_SEGMENTER_LOG_LINEAR_COST = 1.0;
@@ -157,17 +161,37 @@ public class CalculateContamination extends CommandLineProgram {
     }
 
     private List<List<PileupSummary>> findContigSegments(List<PileupSummary> sites) {
+        // segment based on obvious hets
+        final List<PileupSummary> hetSites = sites.stream()
+                .filter(ps -> ALT_FRACTIONS_FOR_SEGMENTATION.contains(ps.getAltFraction()))
+                .collect(Collectors.toList());
+
+        if (hetSites.isEmpty()) {
+            return Collections.emptyList();
+        }
+
         final List<Integer> changepoints = new ArrayList<>();
         // when the kernel segmenter finds a changepoint at index n, that means index n belongs to the left segment, which goes
         // against the usual end-exclusive intervals of IndexRange etc.  This explains adding in the first changepoint of -1
         // instead of 0 and all the "changepoint + 1" constructions below
         changepoints.add(-1);
-        final KernelSegmenter<PileupSummary> segmenter = new KernelSegmenter<>(sites);
+        final KernelSegmenter<PileupSummary> segmenter = new KernelSegmenter<>(hetSites);
         changepoints.addAll(segmenter.findChangepoints(MAX_CHANGEPOINTS_PER_CHROMOSOME, SEGMENTATION_KERNEL, KERNEL_SEGMENTER_DIMENSION,
                 Arrays.asList(POINTS_PER_SEGMENTATION_WINDOW), KERNEL_SEGMENTER_LINEAR_COST, KERNEL_SEGMENTER_LOG_LINEAR_COST, KernelSegmenter.ChangepointSortOrder.INDEX));
-        changepoints.add(sites.size()-1);
-        return IntStream.range(0, changepoints.size() - 1)
-                .mapToObj(n -> sites.subList(changepoints.get(n) + 1, changepoints.get(n+1) + 1))
+        changepoints.add(hetSites.size()-1);
+
+        final List<SimpleInterval> segments = IntStream.range(0, changepoints.size() - 1)
+                .mapToObj(n -> {
+                    final PileupSummary firstSiteInSegment = hetSites.get(changepoints.get(n) + 1);
+                    final PileupSummary lastSiteInSegment = hetSites.get(changepoints.get(n+1));
+                    return new SimpleInterval(firstSiteInSegment.getContig(), firstSiteInSegment.getStart(), lastSiteInSegment.getEnd());
+                }).collect(Collectors.toList());
+
+        final OverlapDetector<PileupSummary> od = OverlapDetector.create(sites);
+
+        // for each segment, find overlapping sites and sort by coordinate
+        return segments.stream()
+                .map(segment -> od.getOverlaps(segment).stream().sorted(Comparator.comparingInt(PileupSummary::getStart)).collect(Collectors.toList()))
                 .collect(Collectors.toList());
     }
 

@@ -109,9 +109,9 @@ public class CalculateContaminationIntegrationTest extends CommandLineProgramTes
     @DataProvider(name = "spikeInData")
     public Object[][] spikeInData() {
         return new Object[][]{
-                //{NA12891_1_PCT_NA12892_99_PCT, 0.01, BASELINE_CONTAMINATION_OF_NA12892},
-                //{NA12891_3_PCT_NA12892_97_PCT, 0.03, BASELINE_CONTAMINATION_OF_NA12892},
-                //{NA12891_5_PCT_NA12892_95_PCT, 0.05, BASELINE_CONTAMINATION_OF_NA12892},
+                {NA12891_1_PCT_NA12892_99_PCT, 0.01, BASELINE_CONTAMINATION_OF_NA12892},
+                {NA12891_3_PCT_NA12892_97_PCT, 0.03, BASELINE_CONTAMINATION_OF_NA12892},
+                {NA12891_5_PCT_NA12892_95_PCT, 0.05, BASELINE_CONTAMINATION_OF_NA12892},
                 {NA12891_8_PCT_NA12892_92_PCT, 0.08, BASELINE_CONTAMINATION_OF_NA12892}
         };
     }
