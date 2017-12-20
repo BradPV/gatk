@@ -3,6 +3,7 @@ package org.broadinstitute.hellbender.tools.walkers.contamination;
 import htsjdk.samtools.util.OverlapDetector;
 import org.apache.commons.lang3.Range;
 import org.apache.commons.lang3.tuple.Pair;
+import org.apache.commons.math3.distribution.BinomialDistribution;
 import org.apache.commons.math3.stat.descriptive.rank.Median;
 import org.apache.commons.math3.util.FastMath;
 import org.apache.logging.log4j.LogManager;
@@ -17,11 +18,13 @@ import org.broadinstitute.hellbender.tools.copynumber.utils.segmentation.KernelS
 import org.broadinstitute.hellbender.tools.walkers.validation.basicshortmutpileup.BetaBinomialDistribution;
 import org.broadinstitute.hellbender.utils.MathUtils;
 import org.broadinstitute.hellbender.tools.walkers.mutect.FilterMutectCalls;
+import org.broadinstitute.hellbender.utils.OptimizationUtils;
 import org.broadinstitute.hellbender.utils.SimpleInterval;
 
 import java.io.File;
 import java.util.*;
 import java.util.function.BiFunction;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -131,6 +134,8 @@ public class CalculateContamination extends CommandLineProgram {
         return "SUCCESS";
     }
 
+    // in a biallelic site, essentially every non-ref, non-primary alt base is an error, since there are 2 such possible
+    // errors out of 3 total, we multiply by 3/2 to get the total base error rate
     private double errorRate(List<PileupSummary> sites) {
         final long totalBases = sites.stream().mapToInt(PileupSummary::getTotalCount).sum();
         final long otherAltBases = sites.stream().mapToInt(PileupSummary::getOtherAltCount).sum();
@@ -162,14 +167,30 @@ public class CalculateContamination extends CommandLineProgram {
 
     //TODO make this much more sophisticated
     private List<PileupSummary> segmentHomAlts(List<PileupSummary> segment) {
-            return segment.stream().filter(site -> homAltProbability(site) > 0.5).collect(Collectors.toList());
+        final List<PileupSummary> hets = getLikelyHetsBasedOnAlleleFraction(segment);
+        final Function<Double, Double> objective = maf -> logLikelihoodOfHetsInSegment(hets, maf);
+        final double minorAlleleFraction = OptimizationUtils.argmax(objective, ALT_FRACTIONS_FOR_SEGMENTATION.getMinimum(), 0.5, 0.4, 0.01, 0.01, 20);
+
+        return segment.stream().filter(site -> homAltProbability(site) > 0.5).collect(Collectors.toList());
+    }
+
+
+    // we want log(1/2 (likelihood of alt minor + likelihood of alt major))
+    //         =  logSumLog(log likelihood of alt minor, log likelihood of alt major) - log(2)
+    private final double logLikelihoodOfHetsInSegment(final List<PileupSummary> hets, final double minorAlleleFraction) {
+        return hets.stream().mapToDouble(het -> {
+            final int n = het.getTotalCount();
+            final int a = het.getAltCount();
+            final double altMinorLogLikelihood = new BinomialDistribution(null, n, minorAlleleFraction).logProbability(a);
+            final double altMajorLogLikelihood = new BinomialDistribution(null, n, 1 - minorAlleleFraction).logProbability(a);
+
+            return MathUtils.logSumLog(altMinorLogLikelihood, altMajorLogLikelihood) + MathUtils.LOG_ONE_HALF;
+        }).sum();
     }
 
     private List<List<PileupSummary>> findContigSegments(List<PileupSummary> sites) {
         // segment based on obvious hets
-        final List<PileupSummary> hetSites = sites.stream()
-                .filter(ps -> ALT_FRACTIONS_FOR_SEGMENTATION.contains(ps.getAltFraction()))
-                .collect(Collectors.toList());
+        final List<PileupSummary> hetSites = getLikelyHetsBasedOnAlleleFraction(sites);
 
         if (hetSites.isEmpty()) {
             return Collections.emptyList();
@@ -198,6 +219,12 @@ public class CalculateContamination extends CommandLineProgram {
         return segments.stream()
                 .map(segment -> od.getOverlaps(segment).stream().sorted(Comparator.comparingInt(PileupSummary::getStart)).collect(Collectors.toList()))
                 .collect(Collectors.toList());
+    }
+
+    private List<PileupSummary> getLikelyHetsBasedOnAlleleFraction(List<PileupSummary> sites) {
+        return sites.stream()
+                    .filter(ps -> ALT_FRACTIONS_FOR_SEGMENTATION.contains(ps.getAltFraction()))
+                    .collect(Collectors.toList());
     }
 
     private static Pair<Double, Double> calculateContamination(List<PileupSummary> homAltSites, final double errorRate) {
