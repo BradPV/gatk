@@ -58,7 +58,6 @@ public class CalculateContamination extends CommandLineProgram {
 
     private static final Logger logger = LogManager.getLogger(CalculateContamination.class);
 
-    private static final int MAX_CHANGEPOINTS_PER_GENOME = 100;
     private static final int MAX_CHANGEPOINTS_PER_CHROMOSOME = 10;
     private static final int MIN_SITES_PER_SEGMENT = 5;
 
@@ -79,10 +78,6 @@ public class CalculateContamination extends CommandLineProgram {
     private static final double HET_BETA = 30.0;
     private double HOM_ALT_ALPHA = 120.0;
     private static final double HOM_ALT_BETA = 1.0;
-
-    private static final List<Double> HET_ALPHA_BETA_TO_TRY = Arrays.asList(5., 10., 25., 50., 100., 200., 500.);
-    private static final List<Double> HOM_ALT_ALPHA_TO_TRY = Arrays.asList(5., 10., 25., 50., 100., 200., 500.);
-
 
     @Argument(fullName = StandardArgumentDefinitions.INPUT_LONG_NAME,
             shortName = StandardArgumentDefinitions.INPUT_SHORT_NAME,
@@ -108,7 +103,7 @@ public class CalculateContamination extends CommandLineProgram {
     private final double highCoverageRatioThreshold = DEFAULT_HIGH_COVERAGE_RATIO_THRESHOLD;
 
     private static final double SEGMENTATION_KERNEL_VARIANCE = 0.025;
-    
+
     private static final BiFunction<PileupSummary, PileupSummary, Double> SEGMENTATION_KERNEL = (ps1, ps2) -> {
         final double maf1 = FastMath.min(ps1.getAltFraction(), 1 - ps1.getAltFraction());
         final double maf2 = FastMath.min(ps2.getAltFraction(), 1 - ps2.getAltFraction());
@@ -117,104 +112,62 @@ public class CalculateContamination extends CommandLineProgram {
 
     @Override
     public Object doWork() {
-        final List<PileupSummary> pileupSummaries = filterSites(PileupSummary.readPileupSummaries(inputPileupSummariesTable));
-        final List<PileupSummary> matchedPileupSummaries = matchedPileupSummariesTable == null ? null
-                : filterSites(PileupSummary.readPileupSummaries(matchedPileupSummariesTable));
+        final List<PileupSummary> sites = filterSites(PileupSummary.readFromFile(inputPileupSummariesTable));
 
         // used the matched normal to genotype if available
-        final List<PileupSummary> pileupSummariesForGenotyping = matchedPileupSummaries == null ? pileupSummaries : matchedPileupSummaries;
-        final double expectedHomAltCount = pileupSummariesForGenotyping.stream()
-                .mapToDouble(PileupSummary::getAlleleFrequency)
-                .map(MathUtils::square)
-                .sum();
+        final List<PileupSummary> genotypingSites = matchedPileupSummariesTable == null ? sites :
+                filterSites(PileupSummary.readFromFile(matchedPileupSummariesTable));
 
-        int iteration = 0;
-        double currentContamination = 0.0;
-        while (true) {
-            final double oldContamination = currentContamination;
-            final List<PileupSummary> homAltSites = findHomAltSites(pileupSummariesForGenotyping);
-            final List<PileupSummary> homAltPileups = matchedPileupSummaries == null ? homAltSites : getCorrespondingHomAltSites(homAltSites, pileupSummaries);
-            final Pair<Double, Double> contaminationAndError = calculateContamination(homAltPileups, true);
-            currentContamination = contaminationAndError.getLeft();
-
-            if (homAltSites.size() > expectedHomAltCount) {
-                HOM_ALT_ALPHA *= 1.3;
-            } else {
-                HOM_ALT_ALPHA /= 1.3;
-            }
-
-
-            if (++iteration > 10 || Math.abs(currentContamination - oldContamination) < 0.001) {
-                final double error = contaminationAndError.getRight();
-                ContaminationRecord.writeContaminationTable(Arrays.asList(new ContaminationRecord(ContaminationRecord.Level.WHOLE_BAM.toString(), currentContamination, error)), outputTable);
-                break;
-            }
-        }
+        final List<PileupSummary> homAltGenotypingSites = findHomAltSites(genotypingSites);
+        final List<PileupSummary> homAltSites = subsetSites(sites, homAltGenotypingSites);
+        final Pair<Double, Double> contaminationAndError = calculateContamination(homAltSites, true);
+        final double contamination = contaminationAndError.getLeft();
+        final double error = contaminationAndError.getRight();
+        ContaminationRecord.writeToFile(Arrays.asList(new ContaminationRecord(ContaminationRecord.Level.WHOLE_BAM.toString(), contamination, error)), outputTable);
 
         return "SUCCESS";
     }
 
-    private static List<PileupSummary> getCorrespondingHomAltSites(final List<PileupSummary> homAltsInMatchedNormal, final List<PileupSummary> allSites) {
-        final OverlapDetector<PileupSummary> homAltsInMatchedNormalOverlapDetector = OverlapDetector.create(homAltsInMatchedNormal);
-        return allSites.stream().filter(homAltsInMatchedNormalOverlapDetector::overlapsAny).collect(Collectors.toList());
+
+    // subset sites in the contaminated sample to hom alt site found in the genotyping sample
+    private static List<PileupSummary> subsetSites(final List<PileupSummary> sites, final List<PileupSummary> subsetLoci) {
+        final OverlapDetector<PileupSummary> homAltsInMatchedNormalOverlapDetector = OverlapDetector.create(subsetLoci);
+        return sites.stream().filter(homAltsInMatchedNormalOverlapDetector::overlapsAny).collect(Collectors.toList());
     }
 
-    private List<PileupSummary> findHomAltSites(List<PileupSummary> pileupSummaries) {
-        final List<IndexRange> segments = findAllelicCopyNumberSegments(pileupSummaries)
-                .stream().filter(s -> s.size() >= MIN_SITES_PER_SEGMENT).collect(Collectors.toList());
+    private List<PileupSummary> findHomAltSites(List<PileupSummary> sites) {
+        final Map<String, List<PileupSummary>> sitesByContig = sites.stream().collect(Collectors.groupingBy(PileupSummary::getContig));
 
-        // test
-        final List<List<PileupSummary>> segmentPileups = segments.stream()
-                .map(segment -> IntStream.range(segment.from, segment.to).mapToObj(pileupSummaries::get).collect(Collectors.toList()))
-                .collect(Collectors.toList());
-        final double x = genomeLogLikelihood(segmentPileups);
-        // test
-
-        final List<List<PileupSummary>> homAltSitesBySegment = findHomAltSitesBySegment(pileupSummaries, segments);
-
-        final double[] contaminationEstimatesBySegment = homAltSitesBySegment.stream()
-                .mapToDouble(segmentSites -> calculateContamination(segmentSites, false).getLeft())
-                .toArray();
-        final double[] nonZeroContaminationEstimatesBySegment = Arrays.stream(contaminationEstimatesBySegment)
-                .filter(c -> c > 0).toArray();
-        final double medianSegmentEstimate = new Median().evaluate(nonZeroContaminationEstimatesBySegment);
-
-        // filter out segments with very high contamination, which is likely due to loss of heterozygosity
-        final List<List<PileupSummary>> believableHomAltSitesBySegment = IntStream.range(0, homAltSitesBySegment.size())
-                .filter(n -> contaminationEstimatesBySegment[n] < 2 * medianSegmentEstimate || contaminationEstimatesBySegment[n] < medianSegmentEstimate + 0.05)
-                .mapToObj(homAltSitesBySegment::get)
+        final List<List<PileupSummary>> segments = sitesByContig.values().stream()
+                .flatMap(contig -> findContigSegments(contig).stream())
+                .filter(segment -> segment.size() >= MIN_SITES_PER_SEGMENT)
                 .collect(Collectors.toList());
 
-        return believableHomAltSitesBySegment.stream().flatMap(List::stream).collect(Collectors.toList());
+        final List<List<PileupSummary>> homAltSitesBySegment = segments.stream()
+                .map(segment -> segmentHomAlts(segment))
+                .collect(Collectors.toList());
+
+        return homAltSitesBySegment.stream().flatMap(List::stream).collect(Collectors.toList());
     }
 
 
-    private List<List<PileupSummary>> findHomAltSitesBySegment(List<PileupSummary> pileupSummaries, List<IndexRange> segments) {
-        final List<List<PileupSummary>> homAltSitesBySegment = new ArrayList<>();
-        for (final IndexRange segment : segments) {
-            logger.info(String.format("Considering segment with %d sites from %s:%d to %s:%d", segment.size(),
-                    pileupSummaries.get(segment.from).getContig(), pileupSummaries.get(segment.from).getStart(),
-                    pileupSummaries.get(segment.to - 1).getContig(), pileupSummaries.get(segment.to - 1).getStart()));
-
-            final List<PileupSummary> segmentSites = IntStream.range(segment.from, segment.to).mapToObj(pileupSummaries::get).collect(Collectors.toList());
-            final List<PileupSummary> homAltSitesInSegment = findHomAltSitesInSegment(segmentSites);
-
-            homAltSitesBySegment.add(homAltSitesInSegment);
-        }
-        return homAltSitesBySegment;
+    //TODO make this much more sophisticated
+    private List<PileupSummary> segmentHomAlts(List<PileupSummary> segment) {
+            return segment.stream().filter(site -> homAltProbability(site) > 0.5).collect(Collectors.toList());
     }
 
-    private List<IndexRange> findAllelicCopyNumberSegments(List<PileupSummary> pileupSummaries) {
+    private List<List<PileupSummary>> findContigSegments(List<PileupSummary> sites) {
         final List<Integer> changepoints = new ArrayList<>();
-
         // when the kernel segmenter finds a changepoint at index n, that means index n belongs to the left segment, which goes
         // against the usual end-exclusive intervals of IndexRange etc.  This explains adding in the first changepoint of -1
         // instead of 0 and all the "changepoint + 1" constructions below
         changepoints.add(-1);
-        changepoints.addAll(getChangepoints(pileupSummaries));
-        changepoints.add(pileupSummaries.size()-1);
+        final KernelSegmenter<PileupSummary> segmenter = new KernelSegmenter<>(sites);
+        changepoints.addAll(segmenter.findChangepoints(MAX_CHANGEPOINTS_PER_CHROMOSOME, SEGMENTATION_KERNEL, KERNEL_SEGMENTER_DIMENSION,
+                Arrays.asList(POINTS_PER_SEGMENTATION_WINDOW), KERNEL_SEGMENTER_LINEAR_COST, KERNEL_SEGMENTER_LOG_LINEAR_COST, KernelSegmenter.ChangepointSortOrder.INDEX));
+        changepoints.add(sites.size()-1);
         return IntStream.range(0, changepoints.size() - 1)
-                .mapToObj(n -> new IndexRange(changepoints.get(n) + 1, changepoints.get(n+1) + 1))
+                .mapToObj(n -> sites.subList(changepoints.get(n) + 1, changepoints.get(n+1) + 1))
                 .collect(Collectors.toList());
     }
 
@@ -257,19 +210,6 @@ public class CalculateContamination extends CommandLineProgram {
                 .collect(Collectors.toList());
     }
 
-    private static List<Integer> getChangepoints(final List<PileupSummary> pileups) {
-        final int numChromosomes = (int) pileups.stream().map(PileupSummary::getContig).distinct().count();
-        final int numChangepoints = FastMath.min(numChromosomes * MAX_CHANGEPOINTS_PER_CHROMOSOME, MAX_CHANGEPOINTS_PER_GENOME);
-        final KernelSegmenter<PileupSummary> segmenter = new KernelSegmenter<>(pileups);
-        return segmenter.findChangepoints(numChangepoints, SEGMENTATION_KERNEL, KERNEL_SEGMENTER_DIMENSION,
-                Arrays.asList(POINTS_PER_SEGMENTATION_WINDOW), KERNEL_SEGMENTER_LINEAR_COST, KERNEL_SEGMENTER_LOG_LINEAR_COST, KernelSegmenter.ChangepointSortOrder.INDEX);
-    }
-
-
-    private List<PileupSummary> findHomAltSitesInSegment(final List<PileupSummary> sites) {
-        return sites.stream().filter(site -> homAltProbability(site) > 0.5).collect(Collectors.toList());
-    }
-
     private double homAltProbability(final PileupSummary site) {
         final double alleleFrequency = site.getAlleleFrequency();
         final double homAltPrior = MathUtils.square(alleleFrequency);
@@ -289,74 +229,5 @@ public class CalculateContamination extends CommandLineProgram {
 
         return result;
 
-    }
-
-    /**
-     * Given the beta binomial distributions with shapes
-     * het: alpha = beta = hetaAlphaBeta
-     * homAlt: alpha = homAltAlpha, beta = 1
-     * homRef: alpha = 1, beta = homAltAlpha
-     * find the log likelihood of a site
-     */
-    private double siteLogLikelihood(final PileupSummary site, final double hetAlphaBeta, final double homAltAlpha) {
-        final double alleleFrequency = site.getAlleleFrequency();
-        final double homAltPrior = MathUtils.square(alleleFrequency);
-        final double hetPrior = 2 * alleleFrequency * (1 - alleleFrequency);
-        final double homRefPrior = 0.1; //MathUtils.square(1 - alleleFrequency);
-
-        final int altCount = site.getAltCount();
-        final int totalCount = altCount + site.getRefCount();
-
-        // debug
-        if (altCount < totalCount / 3) {
-            return 0;
-        }
-        // debug
-
-        final double homAltLikelihood = new BetaBinomialDistribution(null, homAltAlpha, 1, totalCount).probability(altCount);
-        final double homRefLikelihood = new BetaBinomialDistribution(null, 1, homAltAlpha, totalCount).probability(altCount);
-        final double hetLikelihood = new BetaBinomialDistribution(null, hetAlphaBeta, hetAlphaBeta, totalCount).probability(altCount);
-
-        return FastMath.log(homAltPrior * homAltLikelihood + hetPrior * hetLikelihood + homRefPrior * homRefLikelihood);
-    }
-
-    /**
-     * the log likelihood of all sites in a segment
-     */
-    private double segmentLogLikelihood(final List<PileupSummary> sites, final double hetAlphaBeta, final double homAltAlpha) {
-        return sites.stream().mapToDouble(site -> siteLogLikelihood(site, hetAlphaBeta, homAltAlpha)).sum();
-    }
-
-    private double segmentLogLikelihood(final List<PileupSummary> sites, final double homAltAlpha) {
-        // initialize best index as the one corresponding to too much variance in alt fraction i.e. loss of heterozygosity
-        int bestIndex = 0;
-        double bestLogLikelihood = Double.NEGATIVE_INFINITY;
-        for (int n = 0; n < HET_ALPHA_BETA_TO_TRY.size(); n++) {
-            final double hetAlphaBeta = HET_ALPHA_BETA_TO_TRY.get(n);
-            final double logLikelihood = segmentLogLikelihood(sites, hetAlphaBeta, homAltAlpha);
-            if (logLikelihood > bestLogLikelihood) {
-                bestLogLikelihood = logLikelihood;
-                bestIndex = n;
-            }
-        }
-        return bestLogLikelihood;
-    }
-
-    private double genomeLogLikelihood(final List<List<PileupSummary>> segments, final double homAltAlpha) {
-        return segments.stream().mapToDouble(segment -> segmentLogLikelihood(segment, homAltAlpha)).sum();
-    }
-
-    private double genomeLogLikelihood(final List<List<PileupSummary>> segments) {
-        int bestIndex = 0;
-        double bestLogLikelihood = Double.NEGATIVE_INFINITY;
-        for (int n = 0; n < HOM_ALT_ALPHA_TO_TRY.size(); n++) {
-            final double homAltAlpha = HOM_ALT_ALPHA_TO_TRY.get(n);
-            final double logLikelihood = genomeLogLikelihood(segments, homAltAlpha);
-            if (logLikelihood > bestLogLikelihood) {
-                bestLogLikelihood = logLikelihood;
-                bestIndex = n;
-            }
-        }
-        return bestLogLikelihood;
     }
 }

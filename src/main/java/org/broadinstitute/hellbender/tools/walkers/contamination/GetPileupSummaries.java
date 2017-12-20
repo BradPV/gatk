@@ -17,7 +17,6 @@ import org.broadinstitute.hellbender.engine.filters.ReadFilter;
 import org.broadinstitute.hellbender.engine.filters.ReadFilterLibrary;
 import org.broadinstitute.hellbender.engine.filters.WellformedReadFilter;
 import org.broadinstitute.hellbender.exceptions.UserException;
-import org.broadinstitute.hellbender.tools.walkers.mutect.Mutect2Engine;
 import org.broadinstitute.hellbender.utils.GATKProtectedVariantContextUtils;
 import org.broadinstitute.hellbender.utils.pileup.ReadPileup;
 
@@ -140,7 +139,7 @@ public class GetPileupSummaries extends MultiVariantWalker {
         if (sawVariantsWithoutAlleleFrequency && !sawVariantsWithAlleleFrequency) {
             throw new UserException.BadInput("No variants in population vcf had an allele frequency (AF) field.");
         }
-        PileupSummary.writePileupSummaries(pileupSummaries, outputTable);
+        PileupSummary.writeToFile(pileupSummaries, outputTable);
         return "SUCCESS";
     }
 

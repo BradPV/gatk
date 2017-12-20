@@ -75,7 +75,7 @@ public class CalculateContaminationIntegrationTest extends CommandLineProgramTes
         }
 
         final File psTable = createTempFile("pileups", ".table");
-        PileupSummary.writePileupSummaries(ps, psTable);
+        PileupSummary.writeToFile(ps, psTable);
         final File contaminationTable = createTempFile("contamination", ".table");
 
         final String[] args = {
@@ -84,7 +84,7 @@ public class CalculateContaminationIntegrationTest extends CommandLineProgramTes
         };
         runCommandLine(args);
 
-        final double calculatedContamination = ContaminationRecord.readContaminationTable(contaminationTable).get(0).getContamination();
+        final double calculatedContamination = ContaminationRecord.readFromFile(contaminationTable).get(0).getContamination();
         Assert.assertEquals(calculatedContamination, contamination, 0.01);
     }
 
@@ -101,7 +101,7 @@ public class CalculateContaminationIntegrationTest extends CommandLineProgramTes
         };
         runCommandLine(args);
 
-        final double calculatedContamination = ContaminationRecord.readContaminationTable(contaminationTable).get(0).getContamination();
+        final double calculatedContamination = ContaminationRecord.readFromFile(contaminationTable).get(0).getContamination();
         Assert.assertEquals(calculatedContamination, contamination, 0.015);
     }
 
@@ -133,7 +133,7 @@ public class CalculateContaminationIntegrationTest extends CommandLineProgramTes
         };
         runCommandLine(args);
 
-        final double calculatedContamination = ContaminationRecord.readContaminationTable(contaminationTable).get(0).getContamination();
+        final double calculatedContamination = ContaminationRecord.readFromFile(contaminationTable).get(0).getContamination();
         Assert.assertEquals(calculatedContamination, contamination, 0.01);
     }
 
@@ -148,7 +148,7 @@ public class CalculateContaminationIntegrationTest extends CommandLineProgramTes
         };
         runCommandLine(args);
 
-        final double calculatedContamination = ContaminationRecord.readContaminationTable(contaminationTable).get(0).getContamination();
+        final double calculatedContamination = ContaminationRecord.readFromFile(contaminationTable).get(0).getContamination();
         int j = 4;
     }
 
