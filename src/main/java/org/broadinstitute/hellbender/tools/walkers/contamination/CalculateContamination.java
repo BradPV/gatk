@@ -15,7 +15,6 @@ import org.broadinstitute.hellbender.cmdline.StandardArgumentDefinitions;
 import org.broadinstitute.hellbender.cmdline.programgroups.VariantProgramGroup;
 import org.broadinstitute.hellbender.tools.copynumber.utils.segmentation.KernelSegmenter;
 import org.broadinstitute.hellbender.tools.walkers.validation.basicshortmutpileup.BetaBinomialDistribution;
-import org.broadinstitute.hellbender.utils.IndexRange;
 import org.broadinstitute.hellbender.utils.MathUtils;
 import org.broadinstitute.hellbender.tools.walkers.mutect.FilterMutectCalls;
 import org.broadinstitute.hellbender.utils.SimpleInterval;
@@ -124,12 +123,18 @@ public class CalculateContamination extends CommandLineProgram {
 
         final List<PileupSummary> homAltGenotypingSites = findHomAltSites(genotypingSites);
         final List<PileupSummary> homAltSites = subsetSites(sites, homAltGenotypingSites);
-        final Pair<Double, Double> contaminationAndError = calculateContamination(homAltSites, true);
+        final Pair<Double, Double> contaminationAndError = calculateContamination(homAltSites, errorRate(sites));
         final double contamination = contaminationAndError.getLeft();
         final double error = contaminationAndError.getRight();
         ContaminationRecord.writeToFile(Arrays.asList(new ContaminationRecord(ContaminationRecord.Level.WHOLE_BAM.toString(), contamination, error)), outputTable);
 
         return "SUCCESS";
+    }
+
+    private double errorRate(List<PileupSummary> sites) {
+        final long totalBases = sites.stream().mapToInt(PileupSummary::getTotalCount).sum();
+        final long otherAltBases = sites.stream().mapToInt(PileupSummary::getOtherAltCount).sum();
+        return 1.5 * ((double) otherAltBases / totalBases);
     }
 
 
@@ -195,7 +200,7 @@ public class CalculateContamination extends CommandLineProgram {
                 .collect(Collectors.toList());
     }
 
-    private static Pair<Double, Double> calculateContamination(List<PileupSummary> homAltSites, final boolean doLogging) {
+    private static Pair<Double, Double> calculateContamination(List<PileupSummary> homAltSites, final double errorRate) {
         if (homAltSites.isEmpty()) {
             logger.warn("No hom alt sites found!  Perhaps GetPileupSummaries was run on too small of an interval, or perhaps the sample was extremely inbred or haploid.");
             return Pair.of(0.0, 1.0);
@@ -205,7 +210,7 @@ public class CalculateContamination extends CommandLineProgram {
         final long totalRefCount = homAltSites.stream().mapToLong(PileupSummary::getRefCount).sum();
 
         // if eg ref is A, alt is C, then # of ref reads due to error is roughly (# of G read + # of T reads)/2
-        final long errorRefCount = homAltSites.stream().mapToLong(PileupSummary::getOtherAltCount).sum() / 2;
+        final long errorRefCount = Math.round(totalReadCount * errorRate / 3);
         final long contaminationRefCount = Math.max(totalRefCount - errorRefCount, 0);
         final double totalDepthWeightedByRefFrequency = homAltSites.stream()
                 .mapToDouble(ps -> ps.getTotalCount() * (1 - ps.getAlleleFrequency()))
@@ -213,13 +218,12 @@ public class CalculateContamination extends CommandLineProgram {
         final double contamination = contaminationRefCount / totalDepthWeightedByRefFrequency;
         final double standardError = Math.sqrt(contamination / totalDepthWeightedByRefFrequency);
 
-        if (doLogging) {
-            logger.info(String.format("In %d homozygous variant sites we find %d reference reads due to contamination and %d" +
+        logger.info(String.format("In %d homozygous variant sites we find %d reference reads due to contamination and %d" +
                     " due to to sequencing error out of a total %d reads.", homAltSites.size(), contaminationRefCount, errorRefCount, totalReadCount));
-            logger.info(String.format("Based on population data, we would expect %d reference reads in a contaminant with equal depths at these sites.", (long) totalDepthWeightedByRefFrequency));
-            logger.info(String.format("Therefore, we estimate a contamination of %.3f.", contamination));
-            logger.info(String.format("The error bars on this estimate are %.5f.", standardError));
-        }
+        logger.info(String.format("Based on population data, we would expect %d reference reads in a contaminant with equal depths at these sites.", (long) totalDepthWeightedByRefFrequency));
+        logger.info(String.format("Therefore, we estimate a contamination of %.3f.", contamination));
+        logger.info(String.format("The error bars on this estimate are %.5f.", standardError));
+
         return Pair.of(contamination, standardError);
     }
 
