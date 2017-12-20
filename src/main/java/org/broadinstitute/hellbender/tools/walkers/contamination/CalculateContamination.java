@@ -80,6 +80,9 @@ public class CalculateContamination extends CommandLineProgram {
     private double HOM_ALT_ALPHA = 120.0;
     private static final double HOM_ALT_BETA = 1.0;
 
+    private static final List<Double> HET_ALPHA_BETA_TO_TRY = Arrays.asList(5., 10., 25., 50., 100., 200., 500.);
+    private static final List<Double> HOM_ALT_ALPHA_TO_TRY = Arrays.asList(5., 10., 25., 50., 100., 200., 500.);
+
 
     @Argument(fullName = StandardArgumentDefinitions.INPUT_LONG_NAME,
             shortName = StandardArgumentDefinitions.INPUT_SHORT_NAME,
@@ -159,6 +162,13 @@ public class CalculateContamination extends CommandLineProgram {
     private List<PileupSummary> findHomAltSites(List<PileupSummary> pileupSummaries) {
         final List<IndexRange> segments = findAllelicCopyNumberSegments(pileupSummaries)
                 .stream().filter(s -> s.size() >= MIN_SITES_PER_SEGMENT).collect(Collectors.toList());
+
+        // test
+        final List<List<PileupSummary>> segmentPileups = segments.stream()
+                .map(segment -> IntStream.range(segment.from, segment.to).mapToObj(pileupSummaries::get).collect(Collectors.toList()))
+                .collect(Collectors.toList());
+        final double x = genomeLogLikelihood(segmentPileups);
+        // test
 
         final List<List<PileupSummary>> homAltSitesBySegment = findHomAltSitesBySegment(pileupSummaries, segments);
 
@@ -264,6 +274,7 @@ public class CalculateContamination extends CommandLineProgram {
         final double alleleFrequency = site.getAlleleFrequency();
         final double homAltPrior = MathUtils.square(alleleFrequency);
         final double hetPrior = 2 * alleleFrequency * (1 - alleleFrequency);
+        final double homRefPrior = MathUtils.square(1 - alleleFrequency);
 
         final int altCount = site.getAltCount();
         final int totalCount = altCount + site.getRefCount();
@@ -278,5 +289,74 @@ public class CalculateContamination extends CommandLineProgram {
 
         return result;
 
+    }
+
+    /**
+     * Given the beta binomial distributions with shapes
+     * het: alpha = beta = hetaAlphaBeta
+     * homAlt: alpha = homAltAlpha, beta = 1
+     * homRef: alpha = 1, beta = homAltAlpha
+     * find the log likelihood of a site
+     */
+    private double siteLogLikelihood(final PileupSummary site, final double hetAlphaBeta, final double homAltAlpha) {
+        final double alleleFrequency = site.getAlleleFrequency();
+        final double homAltPrior = MathUtils.square(alleleFrequency);
+        final double hetPrior = 2 * alleleFrequency * (1 - alleleFrequency);
+        final double homRefPrior = 0.1; //MathUtils.square(1 - alleleFrequency);
+
+        final int altCount = site.getAltCount();
+        final int totalCount = altCount + site.getRefCount();
+
+        // debug
+        if (altCount < totalCount / 3) {
+            return 0;
+        }
+        // debug
+
+        final double homAltLikelihood = new BetaBinomialDistribution(null, homAltAlpha, 1, totalCount).probability(altCount);
+        final double homRefLikelihood = new BetaBinomialDistribution(null, 1, homAltAlpha, totalCount).probability(altCount);
+        final double hetLikelihood = new BetaBinomialDistribution(null, hetAlphaBeta, hetAlphaBeta, totalCount).probability(altCount);
+
+        return FastMath.log(homAltPrior * homAltLikelihood + hetPrior * hetLikelihood + homRefPrior * homRefLikelihood);
+    }
+
+    /**
+     * the log likelihood of all sites in a segment
+     */
+    private double segmentLogLikelihood(final List<PileupSummary> sites, final double hetAlphaBeta, final double homAltAlpha) {
+        return sites.stream().mapToDouble(site -> siteLogLikelihood(site, hetAlphaBeta, homAltAlpha)).sum();
+    }
+
+    private double segmentLogLikelihood(final List<PileupSummary> sites, final double homAltAlpha) {
+        // initialize best index as the one corresponding to too much variance in alt fraction i.e. loss of heterozygosity
+        int bestIndex = 0;
+        double bestLogLikelihood = Double.NEGATIVE_INFINITY;
+        for (int n = 0; n < HET_ALPHA_BETA_TO_TRY.size(); n++) {
+            final double hetAlphaBeta = HET_ALPHA_BETA_TO_TRY.get(n);
+            final double logLikelihood = segmentLogLikelihood(sites, hetAlphaBeta, homAltAlpha);
+            if (logLikelihood > bestLogLikelihood) {
+                bestLogLikelihood = logLikelihood;
+                bestIndex = n;
+            }
+        }
+        return bestLogLikelihood;
+    }
+
+    private double genomeLogLikelihood(final List<List<PileupSummary>> segments, final double homAltAlpha) {
+        return segments.stream().mapToDouble(segment -> segmentLogLikelihood(segment, homAltAlpha)).sum();
+    }
+
+    private double genomeLogLikelihood(final List<List<PileupSummary>> segments) {
+        int bestIndex = 0;
+        double bestLogLikelihood = Double.NEGATIVE_INFINITY;
+        for (int n = 0; n < HOM_ALT_ALPHA_TO_TRY.size(); n++) {
+            final double homAltAlpha = HOM_ALT_ALPHA_TO_TRY.get(n);
+            final double logLikelihood = genomeLogLikelihood(segments, homAltAlpha);
+            if (logLikelihood > bestLogLikelihood) {
+                bestLogLikelihood = logLikelihood;
+                bestIndex = n;
+            }
+        }
+        return bestLogLikelihood;
     }
 }
